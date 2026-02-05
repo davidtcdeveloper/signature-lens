@@ -16,7 +16,9 @@ import android.view.Surface
 import com.signaturelens.camera.CameraSession
 import com.signaturelens.camera.CameraState
 import com.signaturelens.core.renderer.RenderThread
+import com.signaturelens.core.intelligence.FaceDetectionManager
 import kotlinx.coroutines.android.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -24,6 +26,7 @@ import java.io.FileOutputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import android.graphics.Bitmap
+import kotlinx.coroutines.Dispatchers
 
 /**
  * Repository for camera operations using Camera2 API.
@@ -37,6 +40,7 @@ import android.graphics.Bitmap
  */
 class CameraRepository(
     private val context: Context,
+    private val faceDetectionManager: FaceDetectionManager? = null,
 ) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     
@@ -47,6 +51,11 @@ class CameraRepository(
     
     // State only modified on cameraDispatcher - no mutex needed
     private var _state: CameraState = CameraState.Idle
+    
+    // Settings state
+    private var exposureCompensation: Int = 0
+    @Volatile
+    private var flashModeValue: Int = CaptureRequest.FLASH_MODE_OFF
 
     private val backCameraId: String by lazy {
         cameraManager.cameraIdList.firstOrNull { id ->
@@ -85,12 +94,24 @@ class CameraRepository(
                 val renderThread = RenderThread(context, surfaceTexture)
                 renderThread.start()
 
-                // Feed frames to RenderThread
+                // Feed frames to RenderThread and trigger face detection
                 imageReader.setOnImageAvailableListener({ reader ->
                     try {
                         val image = reader.acquireLatestImage()
                         if (image != null) {
                             renderThread.enqueueFrame(image)
+                            
+                            // Run face detection asynchronously if manager available
+                            faceDetectionManager?.let {
+                                kotlinx.coroutines.GlobalScope.launch(Dispatchers.Default) {
+                                    try {
+                                        val hasFaces = it.detectFaces(image)
+                                        renderThread.setFaceDetectionResult(hasFaces)
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Face detection error", e)
+                                    }
+                                }
+                            }
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Error acquiring image", e)
@@ -298,6 +319,29 @@ class CameraRepository(
         }
         _state = CameraState.Idle
         cameraThread.quitSafely()
+    }
+
+    // Settings control methods
+    fun setExposureCompensation(evValue: Float) {
+        // Map UI range (-3 to +3 EV) to Camera2 exposure compensation steps
+        // Device typically supports -2 to +2 in steps of 0.5 EV
+        val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
+        val exposureRange = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        
+        if (exposureRange != null) {
+            val stepObj = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
+            val step = stepObj?.toFloat() ?: 0.1f
+            val clamped = evValue.coerceIn(exposureRange.lower.toFloat(), exposureRange.upper.toFloat())
+            exposureCompensation = (clamped / step).toInt()
+        }
+    }
+
+    fun setFlashMode(mode: com.signaturelens.core.settings.FlashMode) {
+        flashModeValue = when (mode) {
+            com.signaturelens.core.settings.FlashMode.OFF -> 0  // CaptureRequest.FLASH_MODE_OFF
+            com.signaturelens.core.settings.FlashMode.AUTO -> 2  // CaptureRequest.FLASH_MODE_AUTO
+            com.signaturelens.core.settings.FlashMode.ON -> 1  // CaptureRequest.FLASH_MODE_ON
+        }
     }
 
     companion object {

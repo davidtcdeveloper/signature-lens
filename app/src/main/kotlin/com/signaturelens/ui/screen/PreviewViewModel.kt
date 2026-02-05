@@ -1,5 +1,6 @@
 package com.signaturelens.ui.screen
 
+import android.content.Intent
 import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.util.Log
@@ -7,6 +8,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.signaturelens.camera.CameraRepository
 import com.signaturelens.core.domain.CaptureRepository
+import com.signaturelens.core.settings.SettingsRepository
+import com.signaturelens.core.settings.FlashMode
+import com.signaturelens.core.settings.PreviewSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -21,7 +25,13 @@ data class PreviewUiState(
     val isPermissionDenied: Boolean = false,
     val isPreviewRunning: Boolean = false,
     val lastCapturedUri: Uri? = null,
-    val errorMessage: String? = null
+    val lastCaptureMimeType: String? = null,
+    val errorMessage: String? = null,
+    // Settings controls
+    val exposureComp: Float = 0f,
+    val gridEnabled: Boolean = false,
+    val flashMode: FlashMode = FlashMode.AUTO,
+    val timerSeconds: Int = 0
 )
 
 /**
@@ -29,11 +39,28 @@ data class PreviewUiState(
  */
 class PreviewViewModel(
     private val cameraRepository: CameraRepository,
-    private val captureRepository: CaptureRepository
+    private val captureRepository: CaptureRepository,
+    private val settingsRepository: SettingsRepository
 ) : ViewModel() {
     
     private val _uiState = MutableStateFlow(PreviewUiState())
     val uiState: StateFlow<PreviewUiState> = _uiState
+    
+    init {
+        // Sync settings into UI state
+        viewModelScope.launch {
+            settingsRepository.settings.collect { settings ->
+                _uiState.update { 
+                    it.copy(
+                        exposureComp = settings.exposureComp,
+                        gridEnabled = settings.gridEnabled,
+                        flashMode = settings.flashMode,
+                        timerSeconds = settings.timerSeconds
+                    )
+                }
+            }
+        }
+    }
     
     fun onPermissionGranted() {
         _uiState.update { it.copy(hasPermission = true, isPermissionDenied = false) }
@@ -77,6 +104,7 @@ class PreviewViewModel(
                     _uiState.update { 
                         it.copy(
                             lastCapturedUri = uri,
+                            lastCaptureMimeType = "image/heic",  // Default; can be detected
                             errorMessage = null
                         ) 
                     }
@@ -88,6 +116,53 @@ class PreviewViewModel(
                 }
             )
         }
+    }
+    
+    // Settings controls
+    fun onExposureChange(value: Float) {
+        settingsRepository.updateExposureComp(value)
+        cameraRepository.setExposureCompensation(value)
+    }
+    
+    fun toggleGrid(enabled: Boolean) {
+        settingsRepository.toggleGrid(enabled)
+    }
+    
+    fun setFlashMode(mode: FlashMode) {
+        settingsRepository.setFlashMode(mode)
+        cameraRepository.setFlashMode(mode)
+    }
+    
+    fun setTimer(seconds: Int) {
+        settingsRepository.setTimer(seconds)
+    }
+    
+    fun clearLastCapture() {
+        _uiState.update { it.copy(lastCapturedUri = null, lastCaptureMimeType = null) }
+    }
+    
+    fun deleteLastCapture() {
+        val uri = _uiState.value.lastCapturedUri ?: return
+        viewModelScope.launch {
+            try {
+                captureRepository.deleteCapture(uri)
+                clearLastCapture()
+                Log.d(TAG, "Deleted capture: $uri")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to delete capture", e)
+                _uiState.update { it.copy(errorMessage = "Failed to delete: ${e.message}") }
+            }
+        }
+    }
+
+    fun shareLastCapture(context: android.content.Context) {
+        val uri = _uiState.value.lastCapturedUri ?: return
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/*"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Share image"))
     }
     
     override fun onCleared() {

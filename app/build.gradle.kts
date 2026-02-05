@@ -105,4 +105,10 @@ dependencies {
 
     // Exif Interface
     implementation(libs.androidx.exifinterface)
+
+    // Image Loading
+    implementation(libs.coil.compose)
+
+    // ML Kit Vision
+    implementation(libs.googleplay.services.mlkit.vision.face.detection)
 }

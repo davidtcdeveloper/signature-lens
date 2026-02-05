@@ -15,6 +15,7 @@ class StyleRenderer(private val context: Context) {
     private var programId: Int = 0
     private var inputTextureId: Int = 0
     private var vignetteStrengthLoc: Int = -1
+    private var hasFacesLoc: Int = -1
 
     // Quad geometry covering the full screen
     private val vertices = floatArrayOf(
@@ -51,6 +52,7 @@ class StyleRenderer(private val context: Context) {
         }
 
         vignetteStrengthLoc = GLES30.glGetUniformLocation(programId, "uVignetteStrength")
+        hasFacesLoc = GLES30.glGetUniformLocation(programId, "uHasFaces")
         
         // Generate input texture
         val textures = IntArray(1)
@@ -63,7 +65,7 @@ class StyleRenderer(private val context: Context) {
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
     }
 
-    fun render(rgbBuffer: ByteBuffer, width: Int, height: Int) {
+    fun render(rgbBuffer: ByteBuffer, width: Int, height: Int, hasFaces: Boolean = false) {
         GLES30.glUseProgram(programId)
 
         // Upload texture
@@ -78,6 +80,7 @@ class StyleRenderer(private val context: Context) {
         // Set uniforms
         GLES30.glUniform1i(GLES30.glGetUniformLocation(programId, "uInputTexture"), 0)
         GLES30.glUniform1f(vignetteStrengthLoc, 1.2f) // Tuning
+        GLES30.glUniform1i(hasFacesLoc, if (hasFaces) 1 else 0)
 
         // Geometry
         vertexBuffer.position(0)

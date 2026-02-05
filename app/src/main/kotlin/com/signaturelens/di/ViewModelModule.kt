@@ -8,5 +8,5 @@ import org.koin.dsl.module
  * Koin module for ViewModel dependencies.
  */
 val viewModelModule = module {
-    viewModel { PreviewViewModel(get(), get()) }
+    viewModel { PreviewViewModel(get(), get(), get()) }
 }

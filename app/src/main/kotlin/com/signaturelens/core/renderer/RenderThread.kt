@@ -35,6 +35,10 @@ class RenderThread(private val context: Context, private val surfaceTexture: Sur
     // Intermediate buffers
     private var previewRgbBuffer: ByteBuffer? = null
     private var captureRgbBuffer: ByteBuffer? = null
+    
+    // Face detection state
+    @Volatile
+    private var hasFaces = false
 
     override fun run() {
         eglHelper = EglHelper()
@@ -83,7 +87,7 @@ class RenderThread(private val context: Context, private val surfaceTexture: Sur
         
         // Render to screen
         GLES30.glViewport(0, 0, width, height)
-        styleRenderer!!.render(previewRgbBuffer!!, width, height)
+        styleRenderer!!.render(previewRgbBuffer!!, width, height, hasFaces)
         eglHelper!!.swapBuffers(eglSurface!!)
     }
 
@@ -123,7 +127,7 @@ class RenderThread(private val context: Context, private val surfaceTexture: Sur
             
             // Render to FBO
             GLES30.glViewport(0, 0, width, height)
-            styleRenderer!!.render(captureRgbBuffer!!, width, height)
+            styleRenderer!!.render(captureRgbBuffer!!, width, height, hasFaces)
             
             // Read pixels
             val pixelBuffer = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
@@ -170,6 +174,10 @@ class RenderThread(private val context: Context, private val surfaceTexture: Sur
         } else {
             image.close()
         }
+    }
+
+    fun setFaceDetectionResult(hasFaces: Boolean) {
+        this.hasFaces = hasFaces
     }
 
     fun capture(image: Image, onComplete: (Result<Bitmap>) -> Unit) {
