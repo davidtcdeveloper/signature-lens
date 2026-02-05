@@ -1,6 +1,7 @@
 package com.signaturelens.camera
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
@@ -8,25 +9,22 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.util.Size
 import android.view.Surface
-import com.signaturelens.camera.CameraSession
-import com.signaturelens.camera.CameraState
 import com.signaturelens.core.renderer.RenderThread
 import com.signaturelens.core.intelligence.FaceDetectionManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import android.graphics.Bitmap
-import kotlinx.coroutines.Dispatchers
 
 /**
  * Repository for camera operations using Camera2 API.
@@ -51,11 +49,6 @@ class CameraRepository(
     
     // State only modified on cameraDispatcher - no mutex needed
     private var _state: CameraState = CameraState.Idle
-    
-    // Settings state
-    private var exposureCompensation: Int = 0
-    @Volatile
-    private var flashModeValue: Int = CaptureRequest.FLASH_MODE_OFF
 
     private val backCameraId: String by lazy {
         cameraManager.cameraIdList.firstOrNull { id ->
@@ -64,93 +57,101 @@ class CameraRepository(
         } ?: "0"
     }
 
+    private val cameraSettings: CameraSettings by lazy {
+        CameraSettings(cameraManager, backCameraId)
+    }
+
     suspend fun startPreview(surfaceTexture: SurfaceTexture) = withContext(cameraDispatcher) {
         try {
             // Close existing session if active
-            if (_state is CameraState.Active) {
-                (_state as CameraState.Active).session.close()
-            }
+            closeExistingSession()
 
-                // Open camera
-                val device = openCamera(backCameraId)
+            // Open camera and configure
+            val device = openCamera(backCameraId)
+            val previewSize = getPreviewSize()
+            
+            surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
 
-                // Configure surface texture size
-                val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
-                val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                val previewSize = streamConfigMap?.getOutputSizes(SurfaceTexture::class.java)?.firstOrNull()
-                    ?: throw IllegalStateException("No preview size found")
+            // Create and setup frame processing
+            val imageReader = createPreviewImageReader(previewSize)
+            val renderThread = RenderThread(context, surfaceTexture)
+            renderThread.start()
+            
+            setupFrameListener(imageReader, renderThread)
 
-                surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
+            // Create session and start preview
+            val captureSession = createCaptureSession(device, listOf(imageReader.surface))
+            val session = CameraSession(
+                device = device,
+                session = captureSession,
+                previewSurface = imageReader.surface,
+                renderThread = renderThread,
+                imageReader = imageReader
+            )
+            
+            _state = CameraState.Active(session)
+            startPreviewRequest(device, captureSession, imageReader.surface)
 
-                // Create ImageReader for YUV processing
-                val imageReader = ImageReader.newInstance(
-                    previewSize.width,
-                    previewSize.height,
-                    ImageFormat.YUV_420_888,
-                    2
-                )
+            Log.d(TAG, "Preview started successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start preview", e)
+            _state = CameraState.Idle
+            throw e
+        }
+    }
 
-                // Start RenderThread
-                val renderThread = RenderThread(context, surfaceTexture)
-                renderThread.start()
+    private fun closeExistingSession() {
+        if (_state is CameraState.Active) {
+            (_state as CameraState.Active).session.close()
+        }
+    }
 
-                // Feed frames to RenderThread and trigger face detection
-                imageReader.setOnImageAvailableListener({ reader ->
-                    try {
-                        val image = reader.acquireLatestImage()
-                        if (image != null) {
-                            renderThread.enqueueFrame(image)
-                            
-                            // Run face detection asynchronously if manager available
-                            faceDetectionManager?.let {
-                                kotlinx.coroutines.GlobalScope.launch(Dispatchers.Default) {
-                                    try {
-                                        val hasFaces = it.detectFaces(image)
-                                        renderThread.setFaceDetectionResult(hasFaces)
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Face detection error", e)
-                                    }
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error acquiring image", e)
-                    }
-                }, cameraHandler)
+    private fun getPreviewSize(): Size {
+        val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
+        val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        return streamConfigMap?.getOutputSizes(SurfaceTexture::class.java)?.firstOrNull()
+            ?: throw IllegalStateException("No preview size found")
+    }
 
-                // Create preview surface (ImageReader surface)
-                val surface = imageReader.surface
+    private fun createPreviewImageReader(size: Size): ImageReader {
+        return ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
+    }
 
-                // Create capture session
-                val captureSession = createCaptureSession(device, listOf(surface))
-
-                // Create immutable session holder
-                val session = CameraSession(
-                    device = device,
-                    session = captureSession,
-                    previewSurface = surface,
-                    renderThread = renderThread,
-                    imageReader = imageReader
-                )
-
-                // Update state
-                _state = CameraState.Active(session)
-
-                // Start repeating preview request
-                val previewRequest = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                    addTarget(surface)
-                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                }.build()
-
-                captureSession.setRepeatingRequest(previewRequest, null, cameraHandler)
-
-                Log.d(TAG, "Preview started successfully")
+    private fun setupFrameListener(imageReader: ImageReader, renderThread: RenderThread) {
+        imageReader.setOnImageAvailableListener({ reader ->
+            try {
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    renderThread.enqueueFrame(image)
+                    triggerFaceDetection(image, renderThread)
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start preview", e)
-                _state = CameraState.Idle
-                throw e
+                Log.e(TAG, "Error acquiring image", e)
             }
+        }, cameraHandler)
+    }
+
+    private fun triggerFaceDetection(image: Image, renderThread: RenderThread) {
+        faceDetectionManager?.let {
+            kotlinx.coroutines.GlobalScope.launch(Dispatchers.Default) {
+                try {
+                    val hasFaces = it.detectFaces(image)
+                    renderThread.setFaceDetectionResult(hasFaces)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Face detection error", e)
+                }
+            }
+        }
+    }
+
+    private fun startPreviewRequest(device: CameraDevice, session: CameraCaptureSession, surface: Surface) {
+        val previewRequest = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            addTarget(surface)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        }.build()
+
+        session.setRepeatingRequest(previewRequest, null, cameraHandler)
     }
 
     suspend fun stopPreview() = withContext(cameraDispatcher) {
@@ -179,91 +180,103 @@ class CameraRepository(
         }
 
         try {
-            // Get max resolution for still capture
-            val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
-            val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val captureSize = streamConfigMap?.getOutputSizes(ImageFormat.YUV_420_888)?.maxByOrNull { it.width * it.height }
-                ?: error("No YUV output sizes available")
+            val captureSize = getCaptureSize()
+            val reader = createCaptureImageReader(captureSize)
+            val newSession = recreateSessionForCapture(session, reader)
 
-            // Create ImageReader for capture
-            val reader = ImageReader.newInstance(
-                captureSize.width,
-                captureSize.height,
-                ImageFormat.YUV_420_888,
-                2
-            )
-
-            // Recreate session with both preview and capture surfaces
-            val newSession = run {
-                session.session.close()
-                
-                val surfaces = listOf(session.previewSurface, reader.surface)
-                val captureSession = createCaptureSession(session.device, surfaces)
-                
-                val newCameraSession = CameraSession(
-                    device = session.device,
-                    session = captureSession,
-                    previewSurface = session.previewSurface,
-                    renderThread = session.renderThread,
-                    imageReader = session.imageReader
-                )
-                
-                _state = CameraState.Active(newCameraSession)
-                newCameraSession
-            }
-
-            // Capture still image
-            val captureBitmap = suspendCancellableCoroutine { continuation ->
-                reader.setOnImageAvailableListener({ imageReader ->
-                    try {
-                        val image = imageReader.acquireLatestImage()
-                        if (image != null) {
-                            // Offload processing to RenderThread
-                            session.renderThread.capture(image) { result ->
-                                if (result.isSuccess) {
-                                    continuation.resume(result.getOrThrow())
-                                } else {
-                                    continuation.resumeWithException(result.exceptionOrNull() ?: RuntimeException("Unknown error"))
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to process captured image", e)
-                        continuation.resumeWithException(e)
-                    }
-                }, cameraHandler)
-
-                continuation.invokeOnCancellation {
-                    reader.close()
-                }
-
-                // Create capture request
-                val captureRequest = session.device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                    addTarget(reader.surface)
-                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                    set(CaptureRequest.JPEG_ORIENTATION, 90)
-                }.build()
-
-                newSession.session.capture(captureRequest, null, cameraHandler)
-            }
-
-            // Restart preview after capture
-            run {
-                val previewRequest = newSession.device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                    addTarget(newSession.previewSurface)
-                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                }.build()
-                newSession.session.setRepeatingRequest(previewRequest, null, cameraHandler)
-            }
-
+            val captureBitmap = performStillCapture(newSession, session, reader)
+            
+            restartPreviewAfterCapture(newSession)
             reader.close()
+            
             captureBitmap
         } catch (e: Exception) {
             Log.e(TAG, "Failed to capture still image", e)
             throw e
         }
+    }
+
+    private fun getCaptureSize(): Size {
+        val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
+        val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        return streamConfigMap?.getOutputSizes(ImageFormat.YUV_420_888)?.maxByOrNull { it.width * it.height }
+            ?: error("No YUV output sizes available")
+    }
+
+    private fun createCaptureImageReader(size: Size): ImageReader {
+        return ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
+    }
+
+    private suspend fun recreateSessionForCapture(oldSession: CameraSession, reader: ImageReader): CameraSession {
+        oldSession.session.close()
+        
+        val surfaces = listOf(oldSession.previewSurface, reader.surface)
+        val captureSession = createCaptureSession(oldSession.device, surfaces)
+        
+        val newCameraSession = CameraSession(
+            device = oldSession.device,
+            session = captureSession,
+            previewSurface = oldSession.previewSurface,
+            renderThread = oldSession.renderThread,
+            imageReader = oldSession.imageReader
+        )
+        
+        _state = CameraState.Active(newCameraSession)
+        return newCameraSession
+    }
+
+    private suspend fun performStillCapture(
+        newSession: CameraSession,
+        originalSession: CameraSession,
+        reader: ImageReader
+    ): Bitmap = suspendCancellableCoroutine { continuation ->
+        reader.setOnImageAvailableListener({ imageReader ->
+            try {
+                val image = imageReader.acquireLatestImage()
+                if (image != null) {
+                    originalSession.renderThread.capture(image) { result ->
+                        handleCaptureResult(result, continuation)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to process captured image", e)
+                continuation.resumeWithException(e)
+            }
+        }, cameraHandler)
+
+        continuation.invokeOnCancellation {
+            reader.close()
+        }
+
+        triggerStillCapture(newSession, reader)
+    }
+
+    private fun handleCaptureResult(result: Result<Bitmap>, continuation: kotlinx.coroutines.CancellableContinuation<Bitmap>) {
+        if (result.isSuccess) {
+            continuation.resume(result.getOrThrow())
+        } else {
+            continuation.resumeWithException(result.exceptionOrNull() ?: RuntimeException("Unknown error"))
+        }
+    }
+
+    private fun triggerStillCapture(session: CameraSession, reader: ImageReader) {
+        val captureRequest = session.device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+            addTarget(reader.surface)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            set(CaptureRequest.JPEG_ORIENTATION, 90)
+        }.build()
+
+        session.session.capture(captureRequest, null, cameraHandler)
+    }
+
+    private fun restartPreviewAfterCapture(session: CameraSession) {
+        val previewRequest = session.device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            addTarget(session.previewSurface)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        }.build()
+        session.session.setRepeatingRequest(previewRequest, null, cameraHandler)
     }
 
     private suspend fun openCamera(cameraId: String): CameraDevice = suspendCancellableCoroutine { continuation ->
@@ -323,25 +336,11 @@ class CameraRepository(
 
     // Settings control methods
     fun setExposureCompensation(evValue: Float) {
-        // Map UI range (-3 to +3 EV) to Camera2 exposure compensation steps
-        // Device typically supports -2 to +2 in steps of 0.5 EV
-        val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
-        val exposureRange = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
-        
-        if (exposureRange != null) {
-            val stepObj = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
-            val step = stepObj?.toFloat() ?: 0.1f
-            val clamped = evValue.coerceIn(exposureRange.lower.toFloat(), exposureRange.upper.toFloat())
-            exposureCompensation = (clamped / step).toInt()
-        }
+        cameraSettings.setExposureComp(evValue)
     }
 
     fun setFlashMode(mode: com.signaturelens.core.settings.FlashMode) {
-        flashModeValue = when (mode) {
-            com.signaturelens.core.settings.FlashMode.OFF -> 0  // CaptureRequest.FLASH_MODE_OFF
-            com.signaturelens.core.settings.FlashMode.AUTO -> 2  // CaptureRequest.FLASH_MODE_AUTO
-            com.signaturelens.core.settings.FlashMode.ON -> 1  // CaptureRequest.FLASH_MODE_ON
-        }
+        cameraSettings.setFlashMode(mode)
     }
 
     companion object {

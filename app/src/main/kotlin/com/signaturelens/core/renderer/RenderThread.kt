@@ -96,58 +96,75 @@ class RenderThread(private val context: Context, private val surfaceTexture: Sur
             val width = image.width
             val height = image.height
             
-            val requiredSize = width * height * 4
-            if (captureRgbBuffer == null || captureRgbBuffer!!.capacity() < requiredSize) {
-                captureRgbBuffer = ByteBuffer.allocateDirect(requiredSize).order(ByteOrder.nativeOrder())
-            }
-            
+            ensureCaptureBuffer(width * height * 4)
             convertYuvToRgb(image, captureRgbBuffer!!)
 
-            // Create FBO for offscreen rendering
-            val fboIds = IntArray(1)
-            GLES30.glGenFramebuffers(1, fboIds, 0)
-            val fboId = fboIds[0]
-            
-            val texIds = IntArray(1)
-            GLES30.glGenTextures(1, texIds, 0)
-            val texId = texIds[0]
-            
-            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texId)
-            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, width, height, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
-            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
-            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
-            
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
-            GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, texId, 0)
-            
-            val status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
-            if (status != GLES30.GL_FRAMEBUFFER_COMPLETE) {
-                throw RuntimeException("Framebuffer not complete: $status")
-            }
+            val (fboId, texId) = setupCaptureFramebuffer(width, height)
             
             // Render to FBO
             GLES30.glViewport(0, 0, width, height)
             styleRenderer!!.render(captureRgbBuffer!!, width, height, hasFaces)
             
-            // Read pixels
-            val pixelBuffer = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
-            GLES30.glReadPixels(0, 0, width, height, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, pixelBuffer)
+            // Read and save to Bitmap
+            val pixelBuffer = readPixelsFromFramebuffer(width, height)
+            cleanupFramebuffer(fboId, texId)
             
-            // Cleanup GL objects
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-            GLES30.glDeleteFramebuffers(1, fboIds, 0)
-            GLES30.glDeleteTextures(1, texIds, 0)
-            
-            // Save to Bitmap
-            pixelBuffer.rewind()
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            bitmap.copyPixelsFromBuffer(pixelBuffer)
-            
+            val bitmap = createBitmapFromPixels(width, height, pixelBuffer)
             onComplete(Result.success(bitmap))
             
         } catch (e: Exception) {
             onComplete(Result.failure(e))
         }
+    }
+
+    private fun ensureCaptureBuffer(requiredSize: Int) {
+        if (captureRgbBuffer == null || captureRgbBuffer!!.capacity() < requiredSize) {
+            captureRgbBuffer = ByteBuffer.allocateDirect(requiredSize).order(ByteOrder.nativeOrder())
+        }
+    }
+
+    private fun setupCaptureFramebuffer(width: Int, height: Int): Pair<Int, Int> {
+        val fboIds = IntArray(1)
+        GLES30.glGenFramebuffers(1, fboIds, 0)
+        val fboId = fboIds[0]
+        
+        val texIds = IntArray(1)
+        GLES30.glGenTextures(1, texIds, 0)
+        val texId = texIds[0]
+        
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texId)
+        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, width, height, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+        
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
+        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, texId, 0)
+        
+        val status = GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER)
+        if (status != GLES30.GL_FRAMEBUFFER_COMPLETE) {
+            throw RuntimeException("Framebuffer not complete: $status")
+        }
+        
+        return Pair(fboId, texId)
+    }
+
+    private fun readPixelsFromFramebuffer(width: Int, height: Int): ByteBuffer {
+        val pixelBuffer = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
+        GLES30.glReadPixels(0, 0, width, height, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, pixelBuffer)
+        return pixelBuffer
+    }
+
+    private fun cleanupFramebuffer(fboId: Int, texId: Int) {
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
+        GLES30.glDeleteTextures(1, intArrayOf(texId), 0)
+    }
+
+    private fun createBitmapFromPixels(width: Int, height: Int, pixelBuffer: ByteBuffer): Bitmap {
+        pixelBuffer.rewind()
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        bitmap.copyPixelsFromBuffer(pixelBuffer)
+        return bitmap
     }
 
     private fun convertYuvToRgb(image: Image, outBuffer: ByteBuffer) {
