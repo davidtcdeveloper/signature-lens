@@ -1,4 +1,3 @@
-```markdown
 # SignatureLens - Product & Technical Specification
 
 **Status:** MVP Specification  
@@ -41,29 +40,29 @@ An Android camera application that captures photos with a single, iconic rangefi
 ### 2.1 In Scope (MVP)
 
 - Single aesthetic applied in:
-  - Live camera preview.
-  - Final captured stills.
+    - Live camera preview.
+    - Final captured stills.
 - Output formats:
-  - HEIC as default when device supports hardware HEIC.
-  - Automatic fallback to JPEG otherwise.[web:52]
+    - HEIC as default when device supports hardware HEIC.
+    - Automatic fallback to JPEG otherwise.[web:52]
 - Capture controls:
-  - Exposure compensation ±3 EV.
-  - Grid overlay toggle.
-  - Flash: auto / on / off.
-  - Self-timer: off / 3 s / 10 s.
+    - Exposure compensation ±3 EV.
+    - Grid overlay toggle.
+    - Flash: auto / on / off.
+    - Self-timer: off / 3 s / 10 s.
 - Face-aware processing:
-  - Detect faces and slightly bias tones and contrast for portraits.[web:60]
+    - Detect faces and slightly bias tones and contrast for portraits.[web:60]
 - Simple scene awareness:
-  - Portrait vs. non-portrait differentiations for subtle tuning.
+    - Portrait vs. non-portrait differentiations for subtle tuning.
 - Metadata and storage:
-  - EXIF metadata (date/time, orientation, camera info, GPS where permitted).
-  - MediaStore-based save to `DCIM/SignatureLens`.[web:52]
+    - EXIF metadata (date/time, orientation, camera info, GPS where permitted).
+    - MediaStore-based save to `DCIM/SignatureLens`.[web:52]
 
 - Architecture & tooling:
-  - **Jetpack Compose** for all UI (no XML layouts).[web:68][web:79]
-  - **Kotlin Coroutines** for all async / background work.[web:80]
-  - **Koin** for dependency injection, including Compose integration.[web:68][web:70][web:73]
-  - Automated integration tests (instrumentation) for core flows.[web:60]
+    - **Jetpack Compose** for all UI (no XML layouts).[web:68][web:79]
+    - **Kotlin Coroutines** for all async / background work.[web:80]
+    - **Koin** for dependency injection, including Compose integration.[web:68][web:70][web:73]
+    - Automated integration tests (instrumentation) for core flows.[web:60]
 
 ### 2.2 Out of Scope (MVP)
 
@@ -79,7 +78,7 @@ An Android camera application that captures photos with a single, iconic rangefi
 
 ## 3. TECH STACK
 
-| Layer       | Technology                         | Notes                                                                    |
+| Layer      | Technology                          | Notes                                                                    |
 |------------|-------------------------------------|--------------------------------------------------------------------------|
 | Platform   | Android 10+ (minSdk 29, target 35)  | HEIC + scoped storage + modern APIs.[web:52]                             |
 | Language   | Kotlin 1.9.20+                      | Primary language                                                         |
@@ -289,18 +288,18 @@ test(integration): add compose ui test for capture flow
 ### 9.2 Look Characteristics (High-Level)
 
 - **Color:**
-  - Slight warm bias (+ few hundred K).
-  - Slight magenta push in skin tones.
-  - Natural saturation, good color separation.
+    - Slight warm bias (+ few hundred K).
+    - Slight magenta push in skin tones.
+    - Natural saturation, good color separation.
 - **Tone:**
-  - Lifted blacks (shadow details preserved).
-  - Protected highlights (soft roll-off).
-  - Mid-tone contrast increased (gentle S-curve).
+    - Lifted blacks (shadow details preserved).
+    - Protected highlights (soft roll-off).
+    - Mid-tone contrast increased (gentle S-curve).
 - **Texture:**
-  - Subtle micro-contrast (3D pop).
-  - Light film-like grain.
+    - Subtle micro-contrast (3D pop).
+    - Light film-like grain.
 - **Vignette:**
-  - Shallow vignette for focus, never heavy.
+    - Shallow vignette for focus, never heavy.
 
 ---
 
@@ -386,9 +385,9 @@ fun PreviewScreen(
 **Performance Target:**
 
 - Each frame ≤ 33 ms end-to-end:
-  - YUV decode: a few ms with libyuv.[web:62]
-  - GPU shading: < 10 ms on S23/S24.
-  - Present to display: within refresh budget.
+    - YUV decode: a few ms with libyuv.[web:62]
+    - GPU shading: < 10 ms on S23/S24.
+    - Present to display: within refresh budget.
 
 ### 10.3 Capture & Encoding Pipeline
 
@@ -398,7 +397,7 @@ fun PreviewScreen(
 4. Apply full-resolution color pipeline (GPU or well-optimized CPU).
 5. Encode to HEIC using MediaCodec with HEVC image profile.[web:52]
 6. If hardware HEIC not available:
-   - Fallback to JPEG.
+    - Fallback to JPEG.
 7. Embed EXIF metadata via `ExifInterface`.
 8. Insert into MediaStore in `DCIM/SignatureLens` with correct MIME type.
 
