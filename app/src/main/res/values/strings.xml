@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SignatureLens</string>
+    <string name="permission_camera_required">Camera permission is required to capture photos</string>
+    <string name="permission_camera_rationale">SignatureLens needs camera access to take photos with the rangefinder aesthetic</string>
+    <string name="permission_denied">Permission denied</string>
+    <string name="grant_permission">Grant Permission</string>
+    <string name="retry">Retry</string>
+</resources>
