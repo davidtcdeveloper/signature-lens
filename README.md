@@ -1,3 +1,10 @@
+> This project is an experiment on spec-driven development. Essentially all the files of this project are AI-generated, including the specs.
+> I'll write about the iterative process and the learnings from this experience at some point in the near future. Meanwhile, here are some of my references:
+> - [Agentic Engineering - addyosmani.com](https://addyosmani.com/blog/agentic-engineering/)
+> - [How to write a good spec for AI agents - addyosmani.com](https://addyosmani.com/blog/good-spec/)
+> - [Stop Getting Average Code from Your LLM - merowing.info](https://merowing.info/posts/stop-getting-average-code-from-your-llm/)
+
+
 # SignatureLens
 
 > A focused Android camera app with one iconic rangefinder-style aesthetic
