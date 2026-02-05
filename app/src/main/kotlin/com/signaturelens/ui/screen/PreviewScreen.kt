@@ -4,6 +4,8 @@ import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -12,13 +14,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.signaturelens.R
+import com.signaturelens.ui.components.CameraPreviewSurface
 import org.koin.androidx.compose.koinViewModel
 
-/**
- * Main preview screen for SignatureLens.
- * Phase 1: Shows permission UI and app title placeholder.
- * Phase 2+: Will display camera preview and controls.
- */
 @Composable
 fun PreviewScreen(
     viewModel: PreviewViewModel = koinViewModel()
@@ -41,17 +39,25 @@ fun PreviewScreen(
         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
     }
     
+    // Stop preview when screen is disposed
+    DisposableEffect(Unit) {
+        onDispose {
+            viewModel.stopPreview()
+        }
+    }
+    
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
         when {
             uiState.hasPermission -> {
-                // Permission granted - show placeholder content
-                PermissionGrantedContent()
+                PermissionGrantedContent(
+                    viewModel = viewModel,
+                    uiState = uiState
+                )
             }
             uiState.isPermissionDenied -> {
-                // Permission denied - show rationale
                 PermissionDeniedContent(
                     onRetry = {
                         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
@@ -59,7 +65,6 @@ fun PreviewScreen(
                 )
             }
             else -> {
-                // Waiting for permission
                 CircularProgressIndicator()
             }
         }
@@ -67,33 +72,56 @@ fun PreviewScreen(
 }
 
 @Composable
-private fun PermissionGrantedContent() {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            text = "SignatureLens",
-            style = MaterialTheme.typography.displayMedium,
-            color = MaterialTheme.colorScheme.primary
+private fun PermissionGrantedContent(
+    viewModel: PreviewViewModel,
+    uiState: PreviewUiState
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Camera preview surface
+        CameraPreviewSurface(
+            modifier = Modifier.fillMaxSize(),
+            onSurfaceReady = { surfaceTexture ->
+                viewModel.startPreview(surfaceTexture)
+            }
         )
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = "Camera preview will appear here",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(32.dp))
-        Text(
-            text = "Phase 1: Foundation Complete\nCamera integration in Phase 2",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
-            textAlign = TextAlign.Center
-        )
+        
+        // Shutter button
+        FloatingActionButton(
+            onClick = { viewModel.capture() },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(32.dp),
+            containerColor = MaterialTheme.colorScheme.primary
+        ) {
+            Icon(
+                imageVector = Icons.Default.CameraAlt,
+                contentDescription = "Capture photo",
+                modifier = Modifier.size(32.dp)
+            )
+        }
+        
+        // Error message
+        uiState.errorMessage?.let { error ->
+            Snackbar(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(16.dp)
+            ) {
+                Text(error)
+            }
+        }
+        
+        // Capture feedback
+        uiState.lastCapturedFile?.let { file ->
+            Snackbar(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(16.dp),
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            ) {
+                Text("Captured: ${file.name}")
+            }
+        }
     }
 }
 
