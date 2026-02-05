@@ -13,8 +13,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -22,18 +21,28 @@ import java.io.FileOutputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+/**
+ * Repository for camera operations using Camera2 API.
+ * 
+ * State management:
+ * - Uses sealed class CameraState (Idle | Active) for type-safe state transitions
+ * - All active resources encapsulated in immutable CameraSession
+ * - Single-threaded execution ensures thread safety without blocking
+ * - All operations run on dedicated camera thread for consistency
+ * - Camera2 callbacks and state changes happen on same thread
+ */
 class CameraRepository(
     private val context: Context,
-    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    
+    // Single thread for all camera operations - ensures serial execution
     private val cameraThread = HandlerThread("CameraThread").apply { start() }
     private val cameraHandler = Handler(cameraThread.looper)
-
-    private var cameraDevice: CameraDevice? = null
-    private var captureSession: CameraCaptureSession? = null
-    private var imageReader: ImageReader? = null
-    private var previewSurface: Surface? = null
+    private val cameraDispatcher = cameraHandler.asCoroutineDispatcher()
+    
+    // State only modified on cameraDispatcher - no mutex needed
+    private var _state: CameraState = CameraState.Idle
 
     private val backCameraId: String by lazy {
         cameraManager.cameraIdList.firstOrNull { id ->
@@ -42,73 +51,81 @@ class CameraRepository(
         } ?: "0"
     }
 
-    suspend fun startPreview(surfaceTexture: SurfaceTexture) = withContext(dispatcher) {
+    suspend fun startPreview(surfaceTexture: SurfaceTexture) = withContext(cameraDispatcher) {
         try {
-            // Open camera if not already open
-            if (cameraDevice == null) {
-                cameraDevice = openCamera(backCameraId)
+            // Close existing session if active
+            if (_state is CameraState.Active) {
+                (_state as CameraState.Active).session.close()
             }
 
-            // Configure surface texture size
-            val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
-            val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val previewSize = streamConfigMap?.getOutputSizes(SurfaceTexture::class.java)?.firstOrNull()
-            previewSize?.let {
-                surfaceTexture.setDefaultBufferSize(it.width, it.height)
+                // Open camera
+                val device = openCamera(backCameraId)
+
+                // Configure surface texture size
+                val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
+                val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                val previewSize = streamConfigMap?.getOutputSizes(SurfaceTexture::class.java)?.firstOrNull()
+                previewSize?.let {
+                    surfaceTexture.setDefaultBufferSize(it.width, it.height)
+                }
+
+                // Create preview surface
+                val surface = Surface(surfaceTexture)
+
+                // Create capture session
+                val captureSession = createCaptureSession(device, listOf(surface))
+
+                // Create immutable session holder
+                val session = CameraSession(
+                    device = device,
+                    session = captureSession,
+                    previewSurface = surface
+                )
+
+                // Update state
+                _state = CameraState.Active(session)
+
+                // Start repeating preview request
+                val previewRequest = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    addTarget(surface)
+                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                }.build()
+
+                captureSession.setRepeatingRequest(previewRequest, null, cameraHandler)
+
+                Log.d(TAG, "Preview started successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start preview", e)
+                _state = CameraState.Idle
+                throw e
             }
-
-            // Create preview surface
-            previewSurface = Surface(surfaceTexture)
-
-            // Close old session if exists
-            captureSession?.close()
-            captureSession = null
-
-            // Create capture session with preview surface
-            captureSession = createCaptureSession(
-                cameraDevice!!,
-                listOf(previewSurface!!)
-            )
-
-            // Start repeating preview request
-            val previewRequest = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                addTarget(previewSurface!!)
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            }.build()
-
-            captureSession?.setRepeatingRequest(previewRequest, null, cameraHandler)
-
-            Log.d(TAG, "Preview started successfully")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start preview", e)
-            throw e
-        }
     }
 
-    suspend fun stopPreview() = withContext(dispatcher) {
+    suspend fun stopPreview() = withContext(cameraDispatcher) {
         try {
-            captureSession?.stopRepeating()
-            captureSession?.close()
-            captureSession = null
-
-            cameraDevice?.close()
-            cameraDevice = null
-
-            previewSurface?.release()
-            previewSurface = null
-
-            imageReader?.close()
-            imageReader = null
-
-            Log.d(TAG, "Preview stopped successfully")
+            when (val currentState = _state) {
+                is CameraState.Active -> {
+                    currentState.session.session.stopRepeating()
+                    currentState.session.close()
+                    _state = CameraState.Idle
+                    Log.d(TAG, "Preview stopped successfully")
+                }
+                CameraState.Idle -> {
+                    Log.d(TAG, "Preview already stopped")
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop preview", e)
+            _state = CameraState.Idle
         }
     }
 
-    suspend fun captureStill(): File = withContext(dispatcher) {
-        val device = cameraDevice ?: error("Camera not opened")
+    suspend fun captureStill(): File = withContext(cameraDispatcher) {
+        val session = when (val currentState = _state) {
+            is CameraState.Active -> currentState.session
+            CameraState.Idle -> error("Camera not opened")
+        }
 
         try {
             // Get max resolution for still capture
@@ -126,13 +143,21 @@ class CameraRepository(
             )
 
             // Recreate session with both preview and capture surfaces
-            captureSession?.close()
-            val surfaces = mutableListOf<Surface>()
-            previewSurface?.let { surfaces.add(it) }
-            surfaces.add(reader.surface)
-
-            val session = createCaptureSession(device, surfaces)
-            captureSession = session
+            val newSession = run {
+                session.session.close()
+                
+                val surfaces = listOf(session.previewSurface, reader.surface)
+                val captureSession = createCaptureSession(session.device, surfaces)
+                
+                val newCameraSession = CameraSession(
+                    device = session.device,
+                    session = captureSession,
+                    previewSurface = session.previewSurface
+                )
+                
+                _state = CameraState.Active(newCameraSession)
+                newCameraSession
+            }
 
             // Capture still image
             val captureFile = suspendCancellableCoroutine { continuation ->
@@ -167,24 +192,24 @@ class CameraRepository(
                 }
 
                 // Create capture request
-                val captureRequest = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                val captureRequest = session.device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                     addTarget(reader.surface)
                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                     set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                    set(CaptureRequest.JPEG_ORIENTATION, 90) // Portrait orientation
+                    set(CaptureRequest.JPEG_ORIENTATION, 90)
                 }.build()
 
-                session.capture(captureRequest, null, cameraHandler)
+                newSession.session.capture(captureRequest, null, cameraHandler)
             }
 
             // Restart preview after capture
-            previewSurface?.let { surface ->
-                val previewRequest = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                    addTarget(surface)
+            run {
+                val previewRequest = newSession.device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    addTarget(newSession.previewSurface)
                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                     set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 }.build()
-                session.setRepeatingRequest(previewRequest, null, cameraHandler)
+                newSession.session.setRepeatingRequest(previewRequest, null, cameraHandler)
             }
 
             reader.close()
@@ -243,10 +268,10 @@ class CameraRepository(
     }
 
     fun cleanup() {
-        captureSession?.close()
-        cameraDevice?.close()
-        imageReader?.close()
-        previewSurface?.release()
+        if (_state is CameraState.Active) {
+            (_state as CameraState.Active).session.close()
+        }
+        _state = CameraState.Idle
         cameraThread.quitSafely()
     }
 
