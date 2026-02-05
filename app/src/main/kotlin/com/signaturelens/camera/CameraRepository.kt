@@ -13,6 +13,9 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
+import com.signaturelens.camera.CameraSession
+import com.signaturelens.camera.CameraState
+import com.signaturelens.core.renderer.RenderThread
 import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -65,12 +68,36 @@ class CameraRepository(
                 val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
                 val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 val previewSize = streamConfigMap?.getOutputSizes(SurfaceTexture::class.java)?.firstOrNull()
-                previewSize?.let {
-                    surfaceTexture.setDefaultBufferSize(it.width, it.height)
-                }
+                    ?: throw IllegalStateException("No preview size found")
 
-                // Create preview surface
-                val surface = Surface(surfaceTexture)
+                surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
+
+                // Create ImageReader for YUV processing
+                val imageReader = ImageReader.newInstance(
+                    previewSize.width,
+                    previewSize.height,
+                    ImageFormat.YUV_420_888,
+                    2
+                )
+
+                // Start RenderThread
+                val renderThread = RenderThread(context, surfaceTexture)
+                renderThread.start()
+
+                // Feed frames to RenderThread
+                imageReader.setOnImageAvailableListener({ reader ->
+                    try {
+                        val image = reader.acquireLatestImage()
+                        if (image != null) {
+                            renderThread.enqueueFrame(image)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error acquiring image", e)
+                    }
+                }, cameraHandler)
+
+                // Create preview surface (ImageReader surface)
+                val surface = imageReader.surface
 
                 // Create capture session
                 val captureSession = createCaptureSession(device, listOf(surface))
@@ -79,7 +106,9 @@ class CameraRepository(
                 val session = CameraSession(
                     device = device,
                     session = captureSession,
-                    previewSurface = surface
+                    previewSurface = surface,
+                    renderThread = renderThread,
+                    imageReader = imageReader
                 )
 
                 // Update state
@@ -131,14 +160,14 @@ class CameraRepository(
             // Get max resolution for still capture
             val characteristics = cameraManager.getCameraCharacteristics(backCameraId)
             val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val captureSize = streamConfigMap?.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width * it.height }
-                ?: error("No JPEG output sizes available")
+            val captureSize = streamConfigMap?.getOutputSizes(ImageFormat.YUV_420_888)?.maxByOrNull { it.width * it.height }
+                ?: error("No YUV output sizes available")
 
             // Create ImageReader for capture
             val reader = ImageReader.newInstance(
                 captureSize.width,
                 captureSize.height,
-                ImageFormat.JPEG,
+                ImageFormat.YUV_420_888,
                 2
             )
 
@@ -152,7 +181,9 @@ class CameraRepository(
                 val newCameraSession = CameraSession(
                     device = session.device,
                     session = captureSession,
-                    previewSurface = session.previewSurface
+                    previewSurface = session.previewSurface,
+                    renderThread = session.renderThread,
+                    imageReader = session.imageReader
                 )
                 
                 _state = CameraState.Active(newCameraSession)
@@ -164,22 +195,20 @@ class CameraRepository(
                 reader.setOnImageAvailableListener({ imageReader ->
                     try {
                         val image = imageReader.acquireLatestImage()
-                        image?.use {
-                            val buffer = it.planes[0].buffer
-                            val bytes = ByteArray(buffer.remaining())
-                            buffer.get(bytes)
-
-                            // Save to temp file
+                        if (image != null) {
                             val tempFile = File(
                                 context.cacheDir,
                                 "SignatureLens_temp_${System.currentTimeMillis()}.jpg"
                             )
-                            FileOutputStream(tempFile).use { fos ->
-                                fos.write(bytes)
+                            
+                            // Offload processing to RenderThread
+                            session.renderThread.capture(image, tempFile) { result ->
+                                if (result.isSuccess) {
+                                    continuation.resume(result.getOrThrow())
+                                } else {
+                                    continuation.resumeWithException(result.exceptionOrNull() ?: RuntimeException("Unknown error"))
+                                }
                             }
-
-                            Log.d(TAG, "Captured still image: ${tempFile.absolutePath}")
-                            continuation.resume(tempFile)
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to process captured image", e)

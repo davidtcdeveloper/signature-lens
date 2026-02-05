@@ -5,6 +5,8 @@ import android.hardware.camera2.CameraDevice
 import android.media.ImageReader
 import android.view.Surface
 
+import com.signaturelens.core.renderer.RenderThread
+
 /**
  * Immutable holder for active camera resources.
  * All fields are non-null when session is active.
@@ -12,12 +14,16 @@ import android.view.Surface
 internal data class CameraSession(
     val device: CameraDevice,
     val session: CameraCaptureSession,
-    val previewSurface: Surface
+    val previewSurface: Surface,
+    val renderThread: RenderThread,
+    val imageReader: ImageReader
 ) {
     fun close() {
         session.close()
         device.close()
         previewSurface.release()
+        renderThread.stopRendering()
+        imageReader.close()
     }
 }
 
