@@ -1,8 +1,30 @@
 # SignatureLens - Product & Technical Specification
 
 **Status:** MVP Specification  
-**Version:** 1.1 (Compose + Koin + Coroutines + Integration tests)  
-**Last Updated:** February 4, 2026
+**Version:** 1.2 (AI Agent Optimized)  
+**Last Updated:** February 5, 2026
+
+---
+
+## TABLE OF CONTENTS & QUICK REFERENCE
+
+| Section | Purpose | When to Reference |
+|---------|---------|-------------------|
+| §1 Objective | Vision, success criteria, user goals | Planning, feature decisions |
+| §2 Scope | What's in/out of MVP | Scoping new features |
+| §3 Tech Stack | Technologies & versions | Setup, dependencies |
+| §4 Commands | Build, test, lint commands | Daily development |
+| §5 Structure | File organization | Creating new files/modules |
+| §6 Code Style | Naming, examples | Writing new code |
+| §7 Git Workflow | Branches, commits, PRs | Version control |
+| §8 Boundaries | Always/Ask/Never rules | Decision-making |
+| §9 User Flow | End-to-end user journey | UX/UI implementation |
+| §10 Architecture | ViewModels, pipelines | Core logic implementation |
+| §11 UI/Compose | Composables, screens | UI development |
+| §12 Testing | Unit, integration, strategy | Writing/running tests |
+| §13 Performance | Metrics, targets | Optimization work |
+| §14 Risks | Known issues, mitigations | Problem-solving |
+| §15 Roadmap | Phased implementation | Planning sprints |
 
 ---
 
@@ -24,14 +46,20 @@ An Android camera application that captures photos with a single, iconic rangefi
 - Content creators who want a recognizable, cohesive feed.
 - Users who prefer constraints: one look, one tap, no sliders.
 
-**Success Criteria:**
+**Success Criteria (Acceptance Tests):**
 
-- Real-time preview shows the final look (WYSIWYG).[web:51][web:54]
-- Shutter-to-file (HEIC) under 7 seconds on a Galaxy S23/S24 class device.[web:60]
-- Preview at 28–30 FPS with end-to-end frame latency < 33 ms.[web:56][web:59]
-- HEIC files typically 2–5 MB for 12–24 MP shots (≈60–70% smaller than JPEG).[web:52][web:61]
-- Portraits, landscapes, and architecture are processed intelligently (face-aware and simple scene-aware tuning).
-- Capture → review → save flow takes under 10 seconds for a typical user.
+1. **User Journey Test:** User opens app → sees styled preview → taps shutter → reviews image → saves to gallery in < 10s total.
+2. **Visual Consistency:** All preview frames match final saved image aesthetic (WYSIWYG verified).
+3. **Performance:**
+   - Preview: 28–30 FPS sustained, < 33ms latency (measured with systrace).
+   - Capture: Shutter-to-HEIC-file < 7s on Galaxy S23/S24 (instrumentation test).
+4. **File Quality:**
+   - HEIC: 2–5 MB for 12–24 MP (60–70% smaller than JPEG equivalent).
+   - EXIF metadata present (time, orientation, GPS if permitted).
+5. **Scene Intelligence:**
+   - Portrait mode: Face detection triggers, skin tones warmed (unit test with sample images).
+   - Landscape: No face detection overhead, color grading applied (unit test).
+6. **Reliability:** Zero crashes in core flow across 100 test iterations (instrumented test on device).
 
 ---
 
@@ -260,6 +288,9 @@ test(integration): add compose ui test for capture flow
 - Store photos outside of scoped storage / MediaStore on Android 10+.
 - Bypass runtime permission checks.
 - Directly reference `Context` from Composables (use DI / ViewModels).
+- Commit hardcoded API keys, tokens, or secrets to version control.
+- Modify `gradle/` or `.github/workflows/` without explicit approval.
+- Remove or skip failing tests without documenting why.
 
 ---
 
@@ -503,13 +534,13 @@ fun fileName_usesExpectedPattern() {
 
 - Use AndroidX Test + Compose UI Test framework.[web:79][web:60]
 
-Key flows to cover:
+**Key flows to cover:**
 
 1. App launch → preview visible → shutter tap → file appears in MediaStore.
 2. Settings (grid, exposure) survive process death.
 3. Fakes for CameraRepository in instrumentation to avoid hardware dependency where needed.
 
-Dependencies:
+**Dependencies:**
 
 ```kotlin
 androidTestImplementation("androidx.test.ext:junit:1.1.5")
@@ -519,18 +550,81 @@ androidTestImplementation("androidx.test:rules:1.5.0")
 androidTestImplementation("androidx.test:runner:1.5.2")
 ```
 
-Example Compose test:
+**Example Integration Tests:**
 
 ```kotlin
 @get:Rule
 val composeRule = createAndroidComposeRule<MainActivity>()
 
 @Test
-fun captureFlow_savesFileToMediaStore() {
+fun captureFlow_savesHeicFileToMediaStore() {
+    // Setup: Clear previous test files
+    
+    // Act: Launch → capture → confirm
     composeRule.onNodeWithTag("ShutterButton").performClick()
+    composeRule.waitUntil(5000) { 
+        composeRule.onNodeWithTag("ReviewOverlay").isDisplayed() 
+    }
+    composeRule.onNodeWithTag("ConfirmButton").performClick()
+    
+    // Assert: File exists in MediaStore with correct MIME type
+    val cursor = context.contentResolver.query(
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+        arrayOf(MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.MIME_TYPE),
+        "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?",
+        arrayOf("SignatureLens_%"),
+        "${MediaStore.Images.Media.DATE_ADDED} DESC"
+    )
+    cursor?.use {
+        assertThat(it.moveToFirst()).isTrue()
+        val mimeType = it.getString(it.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE))
+        assertThat(mimeType).isEqualTo("image/heic")
+    }
+}
 
-    // Wait for capture to complete (state or IdlingResource)
-    // Then assert MediaStore contains new item with expected MIME type
+@Test
+fun preview_maintainsTargetFps() {
+    // Use Choreographer to measure frame times
+    val frameTimes = mutableListOf<Long>()
+    val callback = Choreographer.FrameCallback { frameTimeNanos ->
+        frameTimes.add(frameTimeNanos)
+    }
+    
+    // Measure 60 frames
+    repeat(60) {
+        Choreographer.getInstance().postFrameCallback(callback)
+        Thread.sleep(33) // ~30 FPS expected
+    }
+    
+    // Calculate average FPS
+    val intervals = frameTimes.zipWithNext { a, b -> b - a }
+    val avgIntervalMs = intervals.average() / 1_000_000.0
+    val fps = 1000.0 / avgIntervalMs
+    
+    assertThat(fps).isAtLeast(28.0)
+}
+
+@Test
+fun exposureCompensation_affectsCapturedImage() {
+    // Capture at -2 EV
+    composeRule.onNodeWithTag("ExposureSlider").performTouchInput {
+        swipeLeft()
+    }
+    composeRule.onNodeWithTag("ShutterButton").performClick()
+    val darkUri = waitForLatestMediaStoreImage()
+    
+    // Capture at +2 EV
+    composeRule.onNodeWithTag("ExposureSlider").performTouchInput {
+        swipeRight()
+    }
+    composeRule.onNodeWithTag("ShutterButton").performClick()
+    val brightUri = waitForLatestMediaStoreImage()
+    
+    // Compare brightness (simple luminance check)
+    val darkBrightness = calculateImageBrightness(darkUri)
+    val brightBrightness = calculateImageBrightness(brightUri)
+    
+    assertThat(brightBrightness).isGreaterThan(darkBrightness)
 }
 ```
 
@@ -569,7 +663,76 @@ Use Android Studio profilers, GPU profiler, and systrace for measurement.[web:60
 
 ---
 
-## 14. RISK & MITIGATION
+## 14. KNOWN PITFALLS & GOTCHAS
+
+### Camera2 API Common Mistakes
+
+**Problem:** ImageReader surfaces not closed → memory leak.  
+**Solution:** Always close in try-finally or use `.use {}` extension.
+
+```kotlin
+// ❌ BAD
+val reader = ImageReader.newInstance(width, height, format, maxImages)
+// ... might throw before closing
+
+// ✅ GOOD
+ImageReader.newInstance(width, height, format, maxImages).use { reader ->
+    // ... work with reader
+} // auto-closed
+```
+
+**Problem:** CaptureRequest set on wrong thread → crash.  
+**Solution:** Camera2 callbacks run on Handler thread; use `viewModelScope.launch(Dispatchers.Main)` for UI updates.
+
+**Problem:** Preview stutters when face detection runs every frame.  
+**Solution:** Throttle face detection to every 3rd frame or 10 FPS max. Run on downscaled image.
+
+### HEIC Encoding Gotchas
+
+**Problem:** MediaCodec HEIC encoder not available on all devices.  
+**Check:** Query `MediaCodecList` for "image/heic" or "image/hevc" before attempting encode.
+
+```kotlin
+fun isHeicSupported(): Boolean {
+    val codecs = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+    return codecs.codecInfos.any { 
+        it.supportedTypes.contains("image/heic") || 
+        it.supportedTypes.contains("image/hevc")
+    }
+}
+```
+
+**Problem:** HEIC files don't show thumbnails in some gallery apps.  
+**Solution:** Embed proper EXIF thumbnail and set correct MIME type in MediaStore.
+
+### OpenGL ES Shader Issues
+
+**Problem:** 3D LUT texture sampler fails silently if texture isn't power-of-2.  
+**Solution:** Pad LUT to 64³ or use `GL_TEXTURE_WRAP` properly.
+
+**Problem:** Fragment shader runs slower than expected.  
+**Check:** Use `lowp`/`mediump` precision for color values (not `highp`) to save bandwidth.
+
+### Compose + Camera Integration
+
+**Problem:** `AndroidView` with TextureView causes recomposition flicker.  
+**Solution:** Use `remember` and `DisposableEffect` to maintain single TextureView instance across recompositions.
+
+```kotlin
+@Composable
+fun CameraPreviewSurface() {
+    val textureView = remember { TextureView(context) }
+    DisposableEffect(textureView) {
+        // Setup camera
+        onDispose { /* cleanup */ }
+    }
+    AndroidView({ textureView })
+}
+```
+
+---
+
+## 15. RISK & MITIGATION
 
 | Risk                                 | Mitigation                                                              |
 |--------------------------------------|-------------------------------------------------------------------------|
@@ -581,33 +744,153 @@ Use Android Studio profilers, GPU profiler, and systrace for measurement.[web:60
 
 ---
 
-## 15. ROADMAP (MVP)
+## 16. ROADMAP (MVP) - ATOMIC TASKS
 
-**Phase 1 – Core (2–3 weeks)**  
-- Project setup, DI (Koin), basic Compose shell.
-- Camera2 + TextureView based preview.
-- Basic shutter → capture path (no style yet).
+### Phase 1 – Foundation
 
-**Phase 2 – Style & Pipeline (3–4 weeks)**  
-- libyuv JNI integration.[web:62]  
-- OpenGL ES pipeline, LUT-based grading, tone mapping.[web:56]  
-- Integrate with preview.
+**Task 1.1:** Initialize project with Gradle, Kotlin 1.9.20+, AGP 8.2+  
+**Acceptance:** `./gradlew build` succeeds, app module created.  
+**Dependencies:** None  
+**Spec References:** §3 Tech Stack, §4 Commands
 
-**Phase 3 – HEIC & Storage (2–3 weeks)**  
-- MediaCodec HEIC pipeline.[web:52]  
-- EXIF metadata, MediaStore saving.
+**Task 1.2:** Setup Koin DI with `cameraModule` and `viewModelModule`  
+**Acceptance:** `KoinApplication` initializes in `Application.onCreate()`, test module override works.  
+**Dependencies:** 1.1  
+**Spec References:** §10.1 Architecture, §12.3 Koin in Tests
 
-**Phase 4 – Face-Aware + Polish (2–3 weeks)**  
-- ML Kit face detection integration.[web:60]  
-- Subtle portrait biasing.  
-- Settings integration in Compose UI.  
-- Performance optimization, integration tests.
+**Task 1.3:** Create MainActivity with basic Compose shell (Material3 theme)  
+**Acceptance:** App launches, shows "SignatureLens" text, no crashes.  
+**Dependencies:** 1.2  
+**Spec References:** §11.1 Main Activity, §6.2 Compose
 
-Total MVP: ~9–13 weeks for a single experienced dev, less with a small team.[web:60]
+**Task 1.4:** Implement runtime permissions (Camera, optional Location)  
+**Acceptance:** App requests camera permission on first launch, handles denial gracefully.  
+**Dependencies:** 1.3  
+**Spec References:** §9.1 User Flow
+
+### Phase 2 – Camera Preview
+
+**Task 2.1:** Build `CameraRepository` with Camera2 API (open camera, create session)  
+**Acceptance:** Unit test with fake `CameraDevice` succeeds; real device preview starts without crash.  
+**Dependencies:** 1.2  
+**Spec References:** §10.2 Preview Pipeline, §14 Pitfalls (Camera2)
+
+**Task 2.2:** Create `CameraPreviewSurface` Composable wrapping TextureView  
+**Acceptance:** Displays live camera feed, no recomposition flicker (validated manually).  
+**Dependencies:** 2.1, 1.3  
+**Spec References:** §11.2 PreviewScreen, §14 Pitfalls (Compose+Camera)
+
+**Task 2.3:** Wire PreviewViewModel to CameraRepository, expose `StateFlow<PreviewUiState>`  
+**Acceptance:** Compose UI test verifies preview state updates when camera starts.  
+**Dependencies:** 2.2  
+**Spec References:** §10.1 ViewModel
+
+**Task 2.4:** Implement shutter button → capture full-res frame (YUV to bitmap, save as JPEG temp)  
+**Acceptance:** Tapping shutter saves `/sdcard/DCIM/temp.jpg`, verified via instrumentation test.  
+**Dependencies:** 2.3  
+**Spec References:** §10.3 Capture Pipeline (initial, no HEIC yet)
+
+### Phase 3 – Rangefinder Style (GPU Pipeline)
+
+**Task 3.1:** Setup CMake/JNI for libyuv integration (YUV→RGB conversion)  
+**Acceptance:** JNI method `convertYuvToRgb()` callable from Kotlin, unit test passes with sample YUV buffer.  
+**Dependencies:** None (parallel to Phase 2)  
+**Spec References:** §3 Tech Stack (Native), §10.2 Preview Pipeline
+
+**Task 3.2:** Implement OpenGL ES fragment shader with 3D LUT, tone mapping, vignette  
+**Acceptance:** Shader compiles, applies to test texture, output matches reference image (screenshot test).  
+**Dependencies:** None (parallel)  
+**Spec References:** §10.2 Preview Pipeline, §9.2 Look Characteristics, §14 Pitfalls (OpenGL)
+
+**Task 3.3:** Integrate shader into preview pipeline (YUV→RGB→GL→TextureView)  
+**Acceptance:** Live preview shows rangefinder look in real-time, 28+ FPS on S23 (profiler verified).  
+**Dependencies:** 2.2, 3.1, 3.2  
+**Spec References:** §10.2 Preview Pipeline, §13 Performance
+
+**Task 3.4:** Apply shader to full-res capture (not just preview)  
+**Acceptance:** Saved JPEG has rangefinder look matching preview (visual comparison test).  
+**Dependencies:** 2.4, 3.2  
+**Spec References:** §10.3 Capture Pipeline
+
+### Phase 4 – HEIC Output
+
+**Task 4.1:** Check device HEIC codec support, implement fallback logic  
+**Acceptance:** `isHeicSupported()` returns correct value on test devices (S23=true, older=false).  
+**Dependencies:** None  
+**Spec References:** §14 Pitfalls (HEIC Encoding)
+
+**Task 4.2:** Build MediaCodec HEIC encoder pipeline (RGB→HEVC image)  
+**Acceptance:** Captures encode to valid `.heic` files viewable in gallery, < 2s encode time on S23.  
+**Dependencies:** 4.1, 3.4  
+**Spec References:** §10.3 Capture Pipeline, §2.1 In Scope
+
+**Task 4.3:** Embed EXIF metadata (date, orientation, GPS) in HEIC files  
+**Acceptance:** `exiftool` confirms metadata presence in saved HEIC files.  
+**Dependencies:** 4.2  
+**Spec References:** §2.1 In Scope (Metadata)
+
+**Task 4.4:** Save to MediaStore with correct MIME type and folder  
+**Acceptance:** Files appear in gallery app under `DCIM/SignatureLens`, instrumentation test verifies.  
+**Dependencies:** 4.3  
+**Spec References:** §2.1 In Scope (Storage), §14 Pitfalls (HEIC thumbnails)
+
+### Phase 5 – Face Detection & Polish
+
+**Task 5.1:** Integrate ML Kit face detection (on downscaled frames, throttled)  
+**Acceptance:** Detects faces in portrait shots, runs at 10 FPS without dropping preview FPS (profiled).  
+**Dependencies:** 3.3 (preview running)  
+**Spec References:** §2.1 Face-Aware, §14 Pitfalls (face detection throttling)
+
+**Task 5.2:** Adjust shader parameters when faces detected (warm bias, local contrast)  
+**Acceptance:** Side-by-side test images show warmer skin tones when face present vs. absent.  
+**Dependencies:** 5.1, 3.3  
+**Spec References:** §9.2 Look Characteristics
+
+**Task 5.3:** Add UI controls (exposure comp, grid, flash, timer) in Compose  
+**Acceptance:** Compose UI test verifies controls visible, state updates on interaction.  
+**Dependencies:** 2.3  
+**Spec References:** §11.2 PreviewScreen, §2.1 Capture controls
+
+**Task 5.4:** Implement CaptureReviewOverlay (confirm/retake/share)  
+**Acceptance:** After capture, overlay appears, tapping confirm saves, retake restarts preview.  
+**Dependencies:** 2.4  
+**Spec References:** §9.1 User Flow (review overlay), §11.2 PreviewScreen
+
+**Task 5.5:** Write integration tests for end-to-end flow  
+**Acceptance:** `captureFlow_savesFileToMediaStore` test passes on real device.  
+**Dependencies:** All above  
+**Spec References:** §12.2 Integration Tests, §1 Success Criteria
+
+**Task 5.6:** Performance profiling & optimization (reduce latency, memory)  
+**Acceptance:** All §13 Performance Targets met on S23/S24, verified via Android Studio Profiler.  
+**Dependencies:** All above  
+**Spec References:** §13 Performance, §14 Risks
 
 ---
 
-## 16. SUMMARY
+**Total MVP:** 6 phases, ~20 atomic tasks. Each task is independently testable and has clear acceptance criteria.
+
+---
+
+## 17. SELF-VERIFICATION CHECKLIST (For AI Agent)
+
+Before marking any task complete, verify:
+
+- [ ] All acceptance criteria from task definition are met
+- [ ] Relevant unit/integration tests pass (`./gradlew test connectedAndroidTest`)
+- [ ] No new lint errors (`./gradlew lint`)
+- [ ] Code follows style guide (§6 Code Style & Naming)
+- [ ] Boundaries respected (§8 Always/Ask/Never)
+- [ ] No hardcoded secrets or credentials
+- [ ] Camera resources properly closed (if applicable)
+- [ ] Coroutines used for blocking work (not UI thread)
+- [ ] Changes documented if behavior differs from spec
+
+**If any item fails:** Stop, fix, and re-verify before proceeding to next task.
+
+---
+
+## 18. SUMMARY
 
 SignatureLens is a focused, constraint-driven camera app:
 
