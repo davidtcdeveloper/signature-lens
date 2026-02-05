@@ -104,5 +104,5 @@ dependencies {
     debugImplementation(libs.bundles.compose.debug)
 
     // Exif Interface
-    implementation("androidx.exifinterface:exifinterface:1.3.7")
+    implementation(libs.androidx.exifinterface)
 }
