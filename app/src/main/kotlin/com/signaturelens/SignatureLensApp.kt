@@ -2,6 +2,7 @@ package com.signaturelens
 
 import android.app.Application
 import com.signaturelens.di.cameraModule
+import com.signaturelens.di.coreModule
 import com.signaturelens.di.viewModelModule
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.context.startKoin
@@ -18,7 +19,7 @@ class SignatureLensApp : Application() {
         // Initialize Koin DI
         startKoin {
             androidContext(this@SignatureLensApp)
-            modules(cameraModule, viewModelModule)
+            modules(cameraModule, viewModelModule, coreModule)
         }
     }
 }

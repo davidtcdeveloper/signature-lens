@@ -22,7 +22,7 @@ import java.io.FileOutputStream
 
 sealed interface RenderRequest {
     data class Preview(val image: Image) : RenderRequest
-    data class Capture(val image: Image, val outputFile: File, val onComplete: (Result<File>) -> Unit) : RenderRequest
+    data class Capture(val image: Image, val onComplete: (Result<Bitmap>) -> Unit) : RenderRequest
 }
 
 class RenderThread(private val context: Context, private val surfaceTexture: SurfaceTexture) : Thread() {
@@ -53,7 +53,7 @@ class RenderThread(private val context: Context, private val surfaceTexture: Sur
                         request.image.close()
                     }
                     is RenderRequest.Capture -> {
-                        processCapture(request.image, request.outputFile, request.onComplete)
+                        processCapture(request.image, request.onComplete)
                         request.image.close()
                     }
                 }
@@ -87,7 +87,7 @@ class RenderThread(private val context: Context, private val surfaceTexture: Sur
         eglHelper!!.swapBuffers(eglSurface!!)
     }
 
-    private fun processCapture(image: Image, outputFile: File, onComplete: (Result<File>) -> Unit) {
+    private fun processCapture(image: Image, onComplete: (Result<Bitmap>) -> Unit) {
         try {
             val width = image.width
             val height = image.height
@@ -134,17 +134,12 @@ class RenderThread(private val context: Context, private val surfaceTexture: Sur
             GLES30.glDeleteFramebuffers(1, fboIds, 0)
             GLES30.glDeleteTextures(1, texIds, 0)
             
-            // Save to file (Bitmap)
+            // Save to Bitmap
             pixelBuffer.rewind()
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             bitmap.copyPixelsFromBuffer(pixelBuffer)
             
-            FileOutputStream(outputFile).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
-            }
-            bitmap.recycle()
-            
-            onComplete(Result.success(outputFile))
+            onComplete(Result.success(bitmap))
             
         } catch (e: Exception) {
             onComplete(Result.failure(e))
@@ -177,8 +172,8 @@ class RenderThread(private val context: Context, private val surfaceTexture: Sur
         }
     }
 
-    fun capture(image: Image, outputFile: File, onComplete: (Result<File>) -> Unit) {
-        queue.offer(RenderRequest.Capture(image, outputFile, onComplete))
+    fun capture(image: Image, onComplete: (Result<Bitmap>) -> Unit) {
+        queue.offer(RenderRequest.Capture(image, onComplete))
     }
 
     fun stopRendering() {

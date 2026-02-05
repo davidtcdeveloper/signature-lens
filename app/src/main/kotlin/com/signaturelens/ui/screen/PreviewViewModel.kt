@@ -1,10 +1,12 @@
 package com.signaturelens.ui.screen
 
 import android.graphics.SurfaceTexture
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.signaturelens.camera.CameraRepository
+import com.signaturelens.core.domain.CaptureRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -18,7 +20,7 @@ data class PreviewUiState(
     val hasPermission: Boolean = false,
     val isPermissionDenied: Boolean = false,
     val isPreviewRunning: Boolean = false,
-    val lastCapturedFile: File? = null,
+    val lastCapturedUri: Uri? = null,
     val errorMessage: String? = null
 )
 
@@ -26,7 +28,8 @@ data class PreviewUiState(
  * ViewModel for the camera preview screen.
  */
 class PreviewViewModel(
-    private val cameraRepository: CameraRepository
+    private val cameraRepository: CameraRepository,
+    private val captureRepository: CaptureRepository
 ) : ViewModel() {
     
     private val _uiState = MutableStateFlow(PreviewUiState())
@@ -67,19 +70,23 @@ class PreviewViewModel(
     
     fun capture() {
         viewModelScope.launch {
-            try {
-                val file = cameraRepository.captureStill()
-                _uiState.update { 
-                    it.copy(
-                        lastCapturedFile = file,
-                        errorMessage = null
-                    ) 
+            // Using CaptureRepository for styled + HEIC/MediaStore save
+            val result = captureRepository.captureStyledImage()
+            result.fold(
+                onSuccess = { uri ->
+                    _uiState.update { 
+                        it.copy(
+                            lastCapturedUri = uri,
+                            errorMessage = null
+                        ) 
+                    }
+                    Log.d(TAG, "Captured image: $uri")
+                },
+                onFailure = { e ->
+                    Log.e(TAG, "Failed to capture image", e)
+                    _uiState.update { it.copy(errorMessage = "Failed to capture: ${e.message}") }
                 }
-                Log.d(TAG, "Captured image: ${file.absolutePath}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to capture image", e)
-                _uiState.update { it.copy(errorMessage = "Failed to capture: ${e.message}") }
-            }
+            )
         }
     }
     

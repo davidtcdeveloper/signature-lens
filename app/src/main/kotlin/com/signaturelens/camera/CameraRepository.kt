@@ -23,6 +23,7 @@ import java.io.File
 import java.io.FileOutputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import android.graphics.Bitmap
 
 /**
  * Repository for camera operations using Camera2 API.
@@ -150,7 +151,7 @@ class CameraRepository(
         }
     }
 
-    suspend fun captureStill(): File = withContext(cameraDispatcher) {
+    suspend fun captureStillBitmap(): Bitmap = withContext(cameraDispatcher) {
         val session = when (val currentState = _state) {
             is CameraState.Active -> currentState.session
             CameraState.Idle -> error("Camera not opened")
@@ -191,18 +192,13 @@ class CameraRepository(
             }
 
             // Capture still image
-            val captureFile = suspendCancellableCoroutine { continuation ->
+            val captureBitmap = suspendCancellableCoroutine { continuation ->
                 reader.setOnImageAvailableListener({ imageReader ->
                     try {
                         val image = imageReader.acquireLatestImage()
                         if (image != null) {
-                            val tempFile = File(
-                                context.cacheDir,
-                                "SignatureLens_temp_${System.currentTimeMillis()}.jpg"
-                            )
-                            
                             // Offload processing to RenderThread
-                            session.renderThread.capture(image, tempFile) { result ->
+                            session.renderThread.capture(image) { result ->
                                 if (result.isSuccess) {
                                     continuation.resume(result.getOrThrow())
                                 } else {
@@ -242,7 +238,7 @@ class CameraRepository(
             }
 
             reader.close()
-            captureFile
+            captureBitmap
         } catch (e: Exception) {
             Log.e(TAG, "Failed to capture still image", e)
             throw e

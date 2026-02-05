@@ -112,14 +112,14 @@ private fun PermissionGrantedContent(
         }
         
         // Capture feedback
-        uiState.lastCapturedFile?.let { file ->
+        uiState.lastCapturedUri?.let { uri ->
             Snackbar(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(16.dp),
                 containerColor = MaterialTheme.colorScheme.primaryContainer
             ) {
-                Text("Captured: ${file.name}")
+                Text("Captured: ${uri.lastPathSegment}")
             }
         }
     }
